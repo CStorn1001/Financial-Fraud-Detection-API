@@ -37,7 +37,7 @@ pip install -r requirements.txt
 
 ### 2. Run API Server
 ```bash
-python main.py
+python fraud_detection_api.py
 ```
 
 ### 3. Test Endpoints
@@ -117,7 +117,7 @@ Designed for:
 
 **Project Structure:**
 ```
-├── main.py              # Complete API implementation
+├── fraud_detection_api.py              # Complete API implementation
 ├── requirements.txt     # Dependencies
 ├── README.md           # This documentation
 └── test_fraud_api.py   # External test client (optional)
