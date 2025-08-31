@@ -16,20 +16,20 @@ class TransactionModel(BaseModel):
     amount: float
     prevBalance: float
     newBalance: float
-    isFraud: int
     isFlaggedFraud: int
+    isFraud: int
 
     # example schema data for model
     model_config = {
         "json_schema_extra": {
             "example": {
-                "step": 1,
+                "step": 45,
                 "type": "CASH-OUT",
-                "amount": 1000.0,
-                "prevBalance": 5000.0,
-                "newBalance": 4000.0,
-                "isFraud": 0,
-                "isFlaggedFraud": 0
+                "amount": 18000.0,
+                "prevBalance": 20000.0,
+                "newBalance": 2000.0,
+                "isFlaggedFraud": 1,
+                "isFraud": 1
             }
         }
     }
@@ -42,14 +42,14 @@ class FraudResponse(BaseModel):
 
 # Global ML model
 model= None
-scalar = None
+scaler = None
 training_metrics={}
 
 def create_model():
     """ Create and train a simple fraud detection mode with XGBoost """
-    global model, scalar, training_metrics
+    global model, scaler, training_metrics
     np.random.seed(42)
-    n_samples= 8000
+    n_samples= 5000
     # Generate a synthetic dataset
     data = {
         'step': np.random.randint(1, 744, n_samples),  # simulate 1 month of hourly transactions
@@ -57,8 +57,8 @@ def create_model():
         'amount': np.random.uniform(10, 10000, n_samples),
         'prevBalance': np.random.uniform(0, 20000, n_samples),
         'newBalance': np.random.uniform(0, 20000, n_samples),
-        'isFraud': np.random.choice([0, 1], n_samples, p=[0.95, 0.05]),
-        'isFlaggedFraud': np.random.choice([0, 1], n_samples, p=[0.98, 0.02])}
+        'isFlaggedFraud': np.random.choice([0, 1], n_samples, p=[0.98, 0.02]),
+        'isFraud': np.random.choice([0, 1], n_samples, p=[0.95, 0.05])}
     df = pd.DataFrame(data)
 
     # Train-test split
@@ -68,16 +68,16 @@ def create_model():
     X_train, X_test, y_train, y_test = train_test_split(features, target, test_size=0.2, random_state=42)
     
     # Feature scaling
-    scalar = StandardScaler()
-    X_train = scalar.fit_transform(X_train)
-    X_test = scalar.transform(X_test)
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_train)
+    X_test = scaler.transform(X_test)
 
     # Handle class imbalance
     neg, pos = np.bincount(y_train)
     scale = neg / pos
 
     # Train XGBoost model with class weighting
-    model = XGBClassifier(eval_metric='logloss', scale_pos_weight=scale, use_label_encoder=False)
+    model = XGBClassifier(eval_metric='logloss', scale_pos_weight=scale)
     model.fit(X_train, y_train)
     y_pred = model.predict(X_test)
 
@@ -120,31 +120,31 @@ def evaluate_rules(transaction: dict):
 
 def predict_fraud(transaction: TransactionModel):
     """ Predict fraud using the trained ML model and business rules """
-    global model, scalar
-    if model is None or scalar is None:
+    global model, scaler
+    if model is None or scaler is None:
         raise ValueError("Model is not trained yet. Call create_model() first.")
     
     # Convert transaction to DataFrame
-    transaction_df = pd.DataFrame([transaction.dict()])
+    transaction_df = pd.DataFrame([transaction.model_dump()])
     transaction_df = pd.get_dummies(transaction_df, columns=['type'], drop_first=True)
     
     # Ensure all expected columns are present
-    for col in ['type_CASH-OUT', 'type_PAYMENT', 'type_TRANSFER']:
+    for col in ['type_PAYMENT', 'type_TRANSFER']:
         if col not in transaction_df.columns:
             transaction_df[col] = 0
     
-    features = transaction_df.drop(columns=['isFraud']) # Exclude non-numeric and target columns
-    features = scalar.transform(features)
+    features = transaction_df.drop(columns=['isFraud'], errors='ignore') # Exclude non-numeric and target columns
+    features = scaler.transform(features)
     
     # Predict using the ML model
     fraud_prob = model.predict_proba(features)[0][1]
     
     # Evaluate business rules
-    rules_evaluation = evaluate_rules(transaction.dict())
+    rules_evaluation = evaluate_rules(transaction.model_dump())
     
     # Combine results
     combined_score = (fraud_prob + rules_evaluation['risk_score']) / 2
-    is_fraud = combined_score > 0.5
+    is_fraud = combined_score > 0.4
     
     return {
         'isFraud': bool(is_fraud),
@@ -153,6 +153,7 @@ def predict_fraud(transaction: TransactionModel):
 
 # Initialize FastAPI app
 app = FastAPI(title="Financial Fraud Detection API", description="API for detecting financial fraud using a pre-trained ML model", version="1.0.0")
+
 @app.on_event("startup")
 async def startup_event():
     """ Create and train the model at startup """
@@ -160,33 +161,36 @@ async def startup_event():
 
 @app.get("/")
 async def read_root():
-    return {"api": "Fraud Detection", "version": "1.0", "endpoints": ["/predict", "/health"]}
+    return {"api": "Fraud Detection", "version": "1.0", "endpoints": ["/health", "/predict", "/test-scenarios"]}
 
 @app.get("/health")  
 async def health():
+    """ Create a model health"""
     return {
-        "status": "healthy", 
-        "model_loaded": model is not None,
-        "metrics": training_metrics }
+            "status": "healthy", 
+            "model_loaded": model is not None,
+            "metrics": training_metrics }
 
 @app.post("/predict", response_model=FraudResponse)
 async def predict(transaction: TransactionModel):
-    # ML predictions
-    ml_result= predict_fraud(transaction)
-    ml_score = ml_result['confidence']
-
-    # Rule base prediction
-    rule_result = evaluate_rules(transaction.dict())
-    rule_score = rule_result['risk_score']
-
-    # Combine both scores through use of a average between both scores
-    final_score = (ml_score + rule_score) / 2
-    is_fraud = final_score > 0.5
-
-    if is_fraud:
-        return FraudResponse(isFraud=True, confidence=final_score, triggered_rules=ml_result['triggered_rules'] + rule_result['triggered_rules'])
-    else:
-        return FraudResponse(isFraud=False, confidence=final_score, triggered_rules=[])
+        result = predict_fraud(transaction)
+        return FraudResponse(
+            isFraud=result['isFraud'],
+            confidence=result['confidence'],
+            triggered_rules=result['triggered_rules']
+        )
+    
+@app.get("/test-scenarios")
+async def test_scenarios():
+    """Run test predictions to demonstrate the API"""
+    test_cases = [{"step": 100, "type": "PAYMENT", "amount": 200, "prevBalance": 2000, "newBalance": 1800, "isFlaggedFraud": 0, "isFraud": 0},
+        {"step": 35, "type": "CASH-OUT", "amount": 15000, "prevBalance": 16000, "newBalance": 1000, "isFlaggedFraud": 1, "isFraud": 1}]
+    results = []
+    for case in test_cases:
+        transaction = TransactionModel(**case)
+        result = predict_fraud(transaction)
+        results.append({"input": case, "prediction": result})
+    return {"test_results": results}
 
 if __name__ == "__main__":
     create_model()
